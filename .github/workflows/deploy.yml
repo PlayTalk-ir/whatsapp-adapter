@@ -1,0 +1,109 @@
+name: Test & Deploy whatsapp-adapter (VPS)
+
+# WhatsApp Web adapter for the PlayTalk support inbox.
+# Staging VPS is the only deploy target: git pull + systemd, same as bale-adapter.
+# This workflow never sees the WhatsApp QR or the session files.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install and test
+        run: |
+          npm ci
+          npm test
+
+  deploy:
+    if: github.event_name == 'push'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to VPS via SSH (git pull + systemctl restart)
+        env:
+          VPS_DEPLOY_KEY: ${{ secrets.VPS_DEPLOY_KEY }}
+          VPS_HOST: ${{ vars.VPS_HOST || '5.42.223.209' }}
+          VPS_PORT: ${{ vars.VPS_PORT || '3939' }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_DEPLOY_KEY" | tr -d '\r' > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key >/dev/null
+          ssh-keyscan -p "$VPS_PORT" -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+
+          ssh -p "$VPS_PORT" -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new root@"$VPS_HOST" bash -s <<'REMOTE'
+            set -euo pipefail
+            export APP_DIR=/opt/whatsapp-adapter
+            if [ ! -d "$APP_DIR/.git" ]; then
+              git clone --branch main https://github.com/PlayTalk-ir/whatsapp-adapter.git "$APP_DIR"
+            fi
+            cd "$APP_DIR"
+            git fetch origin main
+            git reset --hard origin/main
+
+            install -d -m 0755 /etc/nginx/snippets /var/www/certbot
+            install -m 0644 deploy/nginx/snippets/cloudflare-realip.conf /etc/nginx/snippets/cloudflare-realip.conf
+            install -m 0755 scripts/bootstrap.sh /usr/local/bin/whatsapp-adapter-bootstrap.sh
+            install -m 0644 systemd/whatsapp-adapter.service /etc/systemd/system/whatsapp-adapter.service
+
+            umask 077
+            printf '%s\n' \
+              'WA_API_HOST=127.0.0.1' \
+              'WA_API_PORT=8788' \
+              'WA_DATA_DIR=/opt/whatsapp-adapter/data' \
+              'WA_SENDING_PAUSED=false' \
+              'NODE_ENV=production' \
+              > "$APP_DIR/.env"
+            chmod 600 "$APP_DIR/.env"
+            touch "$APP_DIR/.env.secrets"
+            chmod 600 "$APP_DIR/.env.secrets"
+            if ! grep -q '^WA_ADAPTER_API_TOKENS=.' "$APP_DIR/.env.secrets"; then
+              echo "WA_ADAPTER_API_TOKENS=$(openssl rand -hex 24)" >> "$APP_DIR/.env.secrets"
+              echo "generated a new WA_ADAPTER_API_TOKENS in .env.secrets"
+            fi
+            install -d -m 0700 "$APP_DIR/data"
+
+            systemctl daemon-reload
+            systemctl enable whatsapp-adapter.service
+            systemctl restart whatsapp-adapter.service
+
+            HOSTNAME=whatsapp-adaptor.boostsho.ir
+            if [ ! -f "/etc/letsencrypt/live/${HOSTNAME}/fullchain.pem" ]; then
+              install -m 0644 deploy/nginx/whatsapp-adaptor.http.conf "/etc/nginx/sites-available/${HOSTNAME}.conf"
+              ln -sf "/etc/nginx/sites-available/${HOSTNAME}.conf" "/etc/nginx/sites-enabled/${HOSTNAME}.conf"
+              nginx -t
+              systemctl reload nginx
+              certbot certonly --webroot -w /var/www/certbot -d "$HOSTNAME" --non-interactive --agree-tos --register-unsafely-without-email \
+                || certbot certonly --webroot -w /var/www/certbot -d "$HOSTNAME" --non-interactive --agree-tos
+            fi
+            install -m 0644 deploy/nginx/whatsapp-adaptor.boostsho.ir.conf "/etc/nginx/sites-available/${HOSTNAME}.conf"
+            ln -sf "/etc/nginx/sites-available/${HOSTNAME}.conf" "/etc/nginx/sites-enabled/${HOSTNAME}.conf"
+            nginx -t
+            systemctl reload nginx
+
+            for i in $(seq 1 40); do
+              if curl -sf http://127.0.0.1:8788/healthz >/dev/null; then
+                echo "healthz ok after ${i}s"
+                break
+              fi
+              sleep 1
+            done
+            systemctl is-active whatsapp-adapter.service
+            journalctl -u whatsapp-adapter.service -n 20 --no-pager -o cat | tail -20
+          REMOTE

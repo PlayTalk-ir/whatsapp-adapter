@@ -1,0 +1,20 @@
+[Unit]
+Description=WhatsApp Web adapter for the PlayTalk support inbox
+Documentation=https://github.com/PlayTalk-ir/whatsapp-adapter
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/whatsapp-adapter
+EnvironmentFile=/opt/whatsapp-adapter/.env
+EnvironmentFile=-/opt/whatsapp-adapter/.env.secrets
+ExecStartPre=/usr/local/bin/whatsapp-adapter-bootstrap.sh
+ExecStart=/opt/whatsapp-adapter/.node/bin/node src/server.mjs
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
