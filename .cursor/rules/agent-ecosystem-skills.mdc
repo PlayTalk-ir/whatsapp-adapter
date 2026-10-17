@@ -1,0 +1,12 @@
+---
+description: WhatsApp adapter — engineering agent skills (skills.sh)
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# Agent skills
+
+Restore: `npx skills experimental_install -y`
+
+Use `observability-and-instrumentation` for logs/metrics and `code-review` before merging risky messaging or rate-limit changes.
