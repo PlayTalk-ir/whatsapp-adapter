@@ -84,7 +84,19 @@ jobs:
             systemctl restart whatsapp-adapter.service
 
             HOSTNAME=whatsapp-adaptor.boostsho.ir
+            # install(1) copies the templates unchanged; nothing rewrites listen lines.
+            # :443 belongs to the stream SNI router, so refuse to reload a vhost that binds it.
+            refuse_if_listen_443() {
+              local conf="$1"
+              if grep -E '^[[:space:]]*listen[[:space:]]' "$conf" \
+                | grep -Eq '(^|[[:space:]:])443([[:space:];]|$)'
+              then
+                echo "refusing to reload nginx: ${conf} listens on 443; the stream SNI router owns that port" >&2
+                exit 1
+              fi
+            }
             if [ ! -f "/etc/letsencrypt/live/${HOSTNAME}/fullchain.pem" ]; then
+              refuse_if_listen_443 deploy/nginx/whatsapp-adaptor.http.conf
               install -m 0644 deploy/nginx/whatsapp-adaptor.http.conf "/etc/nginx/sites-available/${HOSTNAME}.conf"
               ln -sf "/etc/nginx/sites-available/${HOSTNAME}.conf" "/etc/nginx/sites-enabled/${HOSTNAME}.conf"
               nginx -t
@@ -92,6 +104,7 @@ jobs:
               certbot certonly --webroot -w /var/www/certbot -d "$HOSTNAME" --non-interactive --agree-tos --register-unsafely-without-email \
                 || certbot certonly --webroot -w /var/www/certbot -d "$HOSTNAME" --non-interactive --agree-tos
             fi
+            refuse_if_listen_443 deploy/nginx/whatsapp-adaptor.boostsho.ir.conf
             install -m 0644 deploy/nginx/whatsapp-adaptor.boostsho.ir.conf "/etc/nginx/sites-available/${HOSTNAME}.conf"
             ln -sf "/etc/nginx/sites-available/${HOSTNAME}.conf" "/etc/nginx/sites-enabled/${HOSTNAME}.conf"
             nginx -t
